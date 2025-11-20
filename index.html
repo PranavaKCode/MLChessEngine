@@ -2,17 +2,18 @@
 <html>
 <head>
     <title>TFJS Chess Engine</title>
-    <!-- Load libraries -->
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.2/chess.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; }
-        #board { width: 400px; margin: 20px; }
-        #status { font-weight: bold; margin-bottom: 10px; }
-        .btn { padding: 10px 20px; background: #333; color: white; border: none; cursor: pointer; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; background: #2c3e50; color: white; }
+        h1 { margin-top: 20px; }
+        #board { width: 400px; margin: 20px; border: 5px solid #34495e; border-radius: 5px; }
+        #status { font-weight: bold; margin-bottom: 10px; font-size: 1.2em; height: 30px; }
+        .btn { padding: 10px 20px; background: #e67e22; color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 16px; }
+        .btn:hover { background: #d35400; }
     </style>
 </head>
 <body>
@@ -24,48 +25,48 @@
 
     <script>
         let board = null;
-        let game = new Chess(); // This is the JS equivalent of python-chess
+        let game = new Chess(); 
         let model = null;
+        let isFrozen = false; // Prevents moving while AI thinks
 
-        // 1. Load the TensorFlow.js Model
         async function loadModel() {
             try {
-                // Make sure the path matches where you put your files
+                // Ensure the path points to the NEW folder you uploaded
                 model = await tf.loadLayersModel('./model/model.json');
-                $('#status').text('Model Loaded! Your Turn (White).');
+                $('#status').text('Model Loaded! Your Turn.');
             } catch (e) {
-                $('#status').text('Error loading model: ' + e);
+                $('#status').text('Error loading model. Check console.');
+                console.error(e);
             }
         }
         loadModel();
 
-        // 2. Helper: Convert Board to 3D Matrix (The hardest part!)
-        // We have to replicate your Python 'board_to_matrix' exactly in JS
         const pieceToLayer = {
             'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,
             'p': 6, 'n': 7, 'b': 8, 'r': 9, 'q': 10, 'k': 11
         };
 
         function boardToMatrix(chessInstance) {
+            // Initialize 8x8x12 tensor with zeros
             const matrix = new Float32Array(8 * 8 * 12).fill(0);
-            const boardConfig = chessInstance.board(); // Returns 8x8 array
+            const boardConfig = chessInstance.board(); 
 
             for (let r = 0; r < 8; r++) {
                 for (let c = 0; c < 8; c++) {
                     const piece = boardConfig[r][c];
                     if (piece) {
-                        // chess.js uses 'w'/'b' and 'p'/'n'... we need to map to your Python format
                         let symbol = piece.type; 
                         if (piece.color === 'w') symbol = symbol.toUpperCase();
                         
-                        // chess.js rows are 0-7 (top to bottom), cols 0-7 (left to right)
-                        // We need to map this to the matrix index
                         const layer = pieceToLayer[symbol];
                         
-                        // Calculate flat index: (row * 8 + col) * 12 + layer
-                        // Note: Double check if your python logic used flip logic. 
-                        // Usually standard is Rank 8 = row 0.
-                        const index = (r * 8 + c) * 12 + layer;
+                        // CRITICAL FIX: Map JS rows to Python rows
+                        // chess.js: Row 0 is Top (Rank 8)
+                        // Python: Row 0 is Bottom (Rank 1)
+                        const pythonRow = 7 - r; 
+                        
+                        // Flat Index = (Row * 8 + Col) * 12 + Layer
+                        const index = (pythonRow * 8 + c) * 12 + layer;
                         matrix[index] = 1;
                     }
                 }
@@ -73,32 +74,28 @@
             return tf.tensor4d(matrix, [1, 8, 8, 12]);
         }
 
-        // 3. The AI Logic (Simple Evaluation)
         async function makeBestMove() {
-            $('#status').text('AI Thinking...');
-            
-            // Allow UI to update before freezing
-            await new Promise(r => setTimeout(r, 10));
-
             const moves = game.moves();
-            if (moves.length === 0) {
+            
+            if (game.game_over() || moves.length === 0) {
                 $('#status').text('Game Over');
+                isFrozen = false;
                 return;
             }
 
             let bestMove = null;
-            let bestScore = Infinity; // Black wants the LOWEST score (negative)
+            let bestScore = Infinity; // Black wants to MINIMIZE the score
 
-            // Simple greedy search (Depth 1)
+            // 1. Evaluate every legal move
             for (let i = 0; i < moves.length; i++) {
                 game.move(moves[i]);
                 
-                // Predict
                 const inputTensor = boardToMatrix(game);
                 const prediction = model.predict(inputTensor);
                 const score = (await prediction.data())[0];
                 
-                inputTensor.dispose(); // Cleanup memory
+                // Clean up tensors to prevent memory leak
+                inputTensor.dispose(); 
                 prediction.dispose();
 
                 if (score < bestScore) {
@@ -109,18 +106,25 @@
                 game.undo();
             }
 
-            game.move(bestMove);
-            board.position(game.fen());
-            $('#status').text('Your Turn');
-            
-            if (game.game_over()) {
-                $('#status').text('Game Over');
+            // 2. Make the best move
+            if (bestMove) {
+                game.move(bestMove);
+                board.position(game.fen());
+                $('#status').text('Your Turn');
+            } else {
+                $('#status').text('AI Resigns');
             }
+            
+            // 3. Unlock board
+            isFrozen = false;
+            if (game.game_over()) $('#status').text('Game Over');
         }
 
-        // 4. Board Interaction
         function onDragStart(source, piece) {
-            if (game.game_over() || piece.search(/^b/) !== -1) return false;
+            // Prevent moving if frozen or game over
+            if (isFrozen) return false;
+            if (game.game_over()) return false;
+            if (piece.search(/^b/) !== -1) return false; // Only move white pieces
         }
 
         function onDrop(source, target) {
@@ -132,7 +136,12 @@
 
             if (move === null) return 'snapback';
 
-            window.setTimeout(makeBestMove, 250);
+            // Lock board and start AI
+            isFrozen = true;
+            $('#status').text('AI Thinking...');
+            
+            // Use setTimeout to allow the UI to update before the heavy calculation freezes the browser
+            window.setTimeout(makeBestMove, 100);
         }
 
         const config = {
@@ -147,6 +156,7 @@
         function resetGame() {
             game.reset();
             board.start();
+            isFrozen = false;
             $('#status').text('Your Turn');
         }
     </script>
